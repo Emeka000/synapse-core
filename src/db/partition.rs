@@ -66,12 +66,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_partition_manager_creation() {
-        let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://synapse:synapse@localhost:5432/synapse_test".to_string());
-        
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://synapse:synapse@localhost:5432/synapse_test".to_string()
+        });
+
         let pool = PgPool::connect(&database_url).await.unwrap();
         let manager = PartitionManager::new(pool, 24);
-        
+
         assert_eq!(manager.interval, Duration::from_secs(24 * 3600));
     }
 }

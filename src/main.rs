@@ -2,21 +2,26 @@ mod config;
 mod db;
 mod error;
 mod handlers;
+mod services;
 mod stellar;
 
-use axum::{Router, extract::State, routing::get};
-use sqlx::migrate::Migrator; // for Migrator
-use std::net::SocketAddr; // for SocketAddr
-use std::path::Path; // for Path
-use tokio::net::TcpListener; // for TcpListener
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
+use axum::{
+    Router,
+    routing::{get, put},
+};
+use services::FeatureFlagService;
+use sqlx::migrate::Migrator;
+use std::net::SocketAddr;
+use std::path::Path;
 use stellar::HorizonClient;
+use tokio::net::TcpListener;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[derive(Clone)] // <-- Add Clone
+#[derive(Clone)]
 pub struct AppState {
     db: sqlx::PgPool,
     pub horizon_client: HorizonClient,
+    pub feature_flags: FeatureFlagService,
 }
 
 #[tokio::main]
@@ -46,15 +51,27 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize Stellar Horizon client
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
-    tracing::info!("Stellar Horizon client initialized with URL: {}", config.stellar_horizon_url);
+    tracing::info!(
+        "Stellar Horizon client initialized with URL: {}",
+        config.stellar_horizon_url
+    );
+
+    // Initialize feature flags service
+    let feature_flags = FeatureFlagService::new(pool.clone());
+    feature_flags.refresh_cache().await?;
+    feature_flags.start(1); // Refresh every 1 hour
+    tracing::info!("Feature flags service initialized");
 
     // Build router with state
-    let app_state = AppState { 
+    let app_state = AppState {
         db: pool,
         horizon_client,
+        feature_flags,
     };
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/admin/flags", get(handlers::admin::get_flags))
+        .route("/admin/flags/:name", put(handlers::admin::update_flag))
         .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
@@ -65,4 +82,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
