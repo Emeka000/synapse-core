@@ -21,9 +21,8 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         dotenv().ok(); // Load .env file if present
 
-        let allowed_ips = parse_allowed_ips(
-            &env::var("ALLOWED_IPS").unwrap_or_else(|_| "*".to_string()),
-        )?;
+        let _allowed_ips =
+            parse_allowed_ips(&env::var("ALLOWED_IPS").unwrap_or_else(|_| "*".to_string()))?;
 
         Ok(Config {
             server_port: env::var("SERVER_PORT")

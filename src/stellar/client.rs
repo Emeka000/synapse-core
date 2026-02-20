@@ -1,5 +1,5 @@
-use failsafe::{backoff, failure_policy, Config, Error as FailsafeError, StateMachine};
 use failsafe::futures::CircuitBreaker as FuturesCircuitBreaker;
+use failsafe::{Config, Error as FailsafeError, StateMachine, backoff, failure_policy};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -102,7 +102,11 @@ impl HorizonClient {
 
     /// Fetches account details from the Horizon API
     pub async fn get_account(&self, address: &str) -> Result<AccountResponse, HorizonError> {
-        let url = format!("{}/accounts/{}", self.base_url.trim_end_matches('/'), address);
+        let url = format!(
+            "{}/accounts/{}",
+            self.base_url.trim_end_matches('/'),
+            address
+        );
         let client = self.client.clone();
         let addr = address.to_string();
 
