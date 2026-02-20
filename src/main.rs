@@ -1,3 +1,4 @@
+mod cli;
 mod config;
 mod db;
 mod error;
@@ -163,6 +164,7 @@ async fn rate_limit_middleware<B>(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
     let config = config::Config::from_env()?;
 
     // Setup logging
@@ -173,7 +175,22 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Database pool
+    match cli.command {
+        Some(Commands::Serve) | None => serve(config).await,
+        Some(Commands::Tx(tx_cmd)) => match tx_cmd {
+            TxCommands::ForceComplete { tx_id } => {
+                let pool = db::create_pool(&config).await?;
+                cli::handle_tx_force_complete(&pool, tx_id).await
+            }
+        },
+        Some(Commands::Db(db_cmd)) => match db_cmd {
+            DbCommands::Migrate => cli::handle_db_migrate(&config).await,
+        },
+        Some(Commands::Config) => cli::handle_config_validate(&config),
+    }
+}
+
+async fn serve(config: config::Config) -> anyhow::Result<()> {
     let pool = db::create_pool(&config).await?;
 
     // Initialize pool manager for multi-region failover
