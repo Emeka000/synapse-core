@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
     
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/callback/transaction", post(handlers::webhook::handle_callback))
         .merge(webhook_routes)
         .with_state(app_state);
 
