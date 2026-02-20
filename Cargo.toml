@@ -28,10 +28,12 @@ reqwest = { version = "0.11", features = ["json"] }
 bigdecimal = { version = "0.3", features = ["serde"] }
 
 [dev-dependencies]
-
 mockito = "1"
 sqlx = { version = "0.7", features = [
     "runtime-tokio-native-tls",
     "postgres",
     "migrate",
 ] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+reqwest = { version = "0.11", features = ["json"] }

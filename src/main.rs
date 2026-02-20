@@ -1,24 +1,9 @@
-mod config;
-mod db;
-mod error;
-mod handlers;
-mod services;
-mod stellar;
-
-use axum::{Router, routing::get};
-use sqlx::migrate::Migrator; // for Migrator
-use std::net::SocketAddr; // for SocketAddr
-use std::path::Path; // for Path
-use tokio::net::TcpListener; // for TcpListener
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
-use stellar::HorizonClient;
-use services::SettlementService;
-
-#[derive(Clone)] // <-- Add Clone
-pub struct AppState {
-    db: sqlx::PgPool,
-    pub horizon_client: HorizonClient,
-}
+use synapse_core::{config, db, create_app, AppState, stellar::HorizonClient, services::SettlementService};
+use sqlx::migrate::Migrator;
+use std::net::SocketAddr;
+use std::path::Path;
+use tokio::net::TcpListener;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -45,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Stellar Horizon client initialized with URL: {}", config.stellar_horizon_url);
 
     // Initialize Settlement Service
-    let settlement_service = SettlementService::new(pool.clone());
+    let _settlement_service = SettlementService::new(pool.clone());
     
     // Start background settlement worker
     let settlement_pool = pool.clone();
@@ -71,11 +56,7 @@ async fn main() -> anyhow::Result<()> {
         db: pool,
         horizon_client,
     };
-    let app = Router::new()
-        .route("/health", get(handlers::health))
-        .route("/settlements", get(handlers::settlements::list_settlements))
-        .route("/settlements/:id", get(handlers::settlements::get_settlement))
-        .with_state(app_state);
+    let app = create_app(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);
@@ -85,4 +66,3 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
