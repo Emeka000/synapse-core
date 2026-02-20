@@ -2,32 +2,26 @@ mod config;
 mod db;
 mod error;
 mod handlers;
+mod services;
 mod stellar;
+mod validation;
 
-use axum::{
-    extract::{ConnectInfo, State},
-    http::{HeaderMap, Request, StatusCode},
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Router,
-};use sqlx::migrate::Migrator; // for Migrator
+use axum::{Router, routing::get};
+use sqlx::migrate::Migrator; // for Migrator
 use std::net::SocketAddr; // for SocketAddr
 use std::path::Path; // for Path
+use stellar::HorizonClient;
 use tokio::net::TcpListener; // for TcpListener
-use tracing_subscriber::prelude::*;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
 use stellar::HorizonClient;
+use services::SettlementService;
 
-
-use governor::Quota;
-use std::sync::Arc;
-use tower_governor::KeyExtractor;
-
-#[derive(Clone)] // <-- Add Clone
+#[derive(Clone)]
 pub struct AppState {
     db: sqlx::PgPool,
+    pub pool_manager: PoolManager,
     pub horizon_client: HorizonClient,
+    pub feature_flags: FeatureFlagService,
 }
 
 // Custom key extractor for rate limiting
@@ -182,14 +176,62 @@ async fn main() -> anyhow::Result<()> {
     // Database pool
     let pool = db::create_pool(&config).await?;
 
+    // Initialize pool manager for multi-region failover
+    let pool_manager = PoolManager::new(
+        &config.database_url,
+        config.database_replica_url.as_deref(),
+    )
+    .await?;
+    
+    if pool_manager.replica().is_some() {
+        tracing::info!("Database replica configured - read queries will be routed to replica");
+    } else {
+        tracing::info!("No replica configured - all queries will use primary database");
+    }
+
     // Run migrations
     let migrator = Migrator::new(Path::new("./migrations")).await?;
     migrator.run(&pool).await?;
     tracing::info!("Database migrations completed");
 
+    // Initialize partition manager (runs every 24 hours)
+    let partition_manager = db::partition::PartitionManager::new(pool.clone(), 24);
+    partition_manager.start();
+    tracing::info!("Partition manager started");
+
     // Initialize Stellar Horizon client
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
-    tracing::info!("Stellar Horizon client initialized with URL: {}", config.stellar_horizon_url);
+    tracing::info!(
+        "Stellar Horizon client initialized with URL: {}",
+        config.stellar_horizon_url
+    );
+
+    // Initialize Settlement Service
+    let settlement_service = SettlementService::new(pool.clone());
+    
+    // Start background settlement worker
+    let settlement_pool = pool.clone();
+    tokio::spawn(async move {
+        let service = SettlementService::new(settlement_pool);
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // Default to hourly
+        loop {
+            interval.tick().await;
+            tracing::info!("Running scheduled settlement job...");
+            match service.run_settlements().await {
+                Ok(results) => {
+                    if !results.is_empty() {
+                        tracing::info!("Successfully generated {} settlements", results.len());
+                    }
+                }
+                Err(e) => tracing::error!("Scheduled settlement job failed: {:?}", e),
+            }
+        }
+    });
+
+    // Initialize metrics
+    let metrics_handle = metrics::init_metrics()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize metrics: {}", e))?;
+    tracing::info!("Metrics initialized successfully");
 
     // Initialize rate limiting
     let rate_limit_config = Arc::new(RateLimitConfig::new(&config));
@@ -203,52 +245,34 @@ async fn main() -> anyhow::Result<()> {
                    config.default_rate_limit, config.whitelist_rate_limit);
 
     // Build router with state
-    let app_state = AppState { 
+    let app_state = AppState {
         db: pool,
+        pool_manager,
         horizon_client,
+        feature_flags,
     };
-
-    // Create main router without rate limiting for non-callback routes
+    
+    // Create metrics route with authentication middleware
+    let metrics_route = Router::new()
+        .route("/metrics", get(|
+            axum::extract::State(state): axum::extract::State<MetricsState>
+        | async move {
+            metrics::metrics_handler(
+                axum::extract::State(state.handle),
+                axum::extract::State(state.pool),
+            ).await
+        }))
+        .layer(middleware::from_fn_with_state(
+            config.clone(),
+            metrics::metrics_auth_middleware,
+        ))
+        .with_state(metrics_state);
+    
     let app = Router::new()
         .route("/health", get(handlers::health))
-        // Add your regular endpoints here (no rate limiting)
-        // .route("/api/users", get(handlers::get_users))
-        .with_state(app_state.clone());
-
-    // Create callback router with rate limiting
-    let callback_router = Router::new()
-        // Add your callback endpoints here
-        .route("/webhook", post(handlers::webhook_callback))
-        .route("/status", post(handlers::status_callback))
-        .route("/payment", post(handlers::payment_callback))
-        .with_state(app_state.clone())
-        .layer(middleware::from_fn(move |req, next| {
-            let config = rate_limit_config.clone();
-            async move {
-                rate_limit_middleware(req, next, config).await
-            }
-        }));
-
-    // Combine routers
-    let app = app.nest("/callback", callback_router);
-
-    // Alternative: If you want to apply rate limiting to all /callback/* routes without nesting
-    // let app = Router::new()
-    //     .route("/callback/webhook", post(handlers::webhook_callback))
-    //     .route("/callback/status", post(handlers::status_callback))
-    //     .route("/callback/payment", post(handlers::payment_callback))
-    //     .route("/health", get(handlers::health))
-    //     .with_state(app_state)
-    //     .layer(middleware::from_fn(move |req, next| {
-    //         let config = rate_limit_config.clone();
-    //         async move {
-    //             if req.uri().path().starts_with("/callback/") {
-    //                 rate_limit_middleware(req, next, config).await
-    //             } else {
-    //                 next.run(req).await
-    //             }
-    //         }
-    //     }));
+        .route("/settlements", get(handlers::settlements::list_settlements))
+        .route("/settlements/:id", get(handlers::settlements::get_settlement))
+        .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("Server listening on {}", addr);

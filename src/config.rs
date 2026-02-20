@@ -7,12 +7,12 @@ use std::env;
 pub struct Config {
     pub server_port: u16,
     pub database_url: String,
+    pub database_replica_url: Option<String>,
     pub stellar_horizon_url: String,
-
-        pub default_rate_limit: u32,
-    pub whitelist_rate_limit: u32,
-    pub whitelisted_ips: String,
+    pub anchor_webhook_secret: String,
 }
+
+pub mod assets;
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         dotenv().ok(); // Load .env file if present
@@ -22,19 +22,9 @@ impl Config {
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()?,
             database_url: env::var("DATABASE_URL")?,
+            database_replica_url: env::var("DATABASE_REPLICA_URL").ok(),
             stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
-            default_rate_limit: env::var("DEFAULT_RATE_LIMIT")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()
-                .expect("DEFAULT_RATE_LIMIT must be a number"),
-            
-            whitelist_rate_limit: env::var("WHITELIST_RATE_LIMIT")
-                .unwrap_or_else(|_| "100".to_string())
-                .parse()
-                .expect("WHITELIST_RATE_LIMIT must be a number"),
-            
-            whitelisted_ips: env::var("WHITELISTED_IPS")
-                .unwrap_or_else(|_| "".to_string()),
+            anchor_webhook_secret: env::var("ANCHOR_WEBHOOK_SECRET")?,
         })
     }
 }
