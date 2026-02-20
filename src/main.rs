@@ -26,12 +26,22 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::from_env()?;
 
     // Setup logging
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    match config.log_format {
+        config::LogFormat::Json => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tracing_subscriber::fmt::layer().json())
+                .init();
+        }
+        config::LogFormat::Text => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+        }
+    }
 
     // Database pool
     let pool = db::create_pool(&config).await?;

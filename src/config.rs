@@ -9,12 +9,19 @@ pub struct Config {
     pub database_url: String,
     pub stellar_horizon_url: String,
     pub redis_url: String,
+    pub log_format: LogFormat,
 }
 
 #[derive(Debug, Clone)]
 pub enum AllowedIps {
     Any,
     Cidrs(Vec<IpNet>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    Text,
+    Json,
 }
 
 impl Config {
@@ -25,6 +32,10 @@ impl Config {
             &env::var("ALLOWED_IPS").unwrap_or_else(|_| "*".to_string()),
         )?;
 
+        let log_format = parse_log_format(
+            &env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()),
+        )?;
+
         Ok(Config {
             server_port: env::var("SERVER_PORT")
                 .unwrap_or_else(|_| "3000".to_string())
@@ -32,6 +43,7 @@ impl Config {
             database_url: env::var("DATABASE_URL")?,
             stellar_horizon_url: env::var("STELLAR_HORIZON_URL")?,
             redis_url: env::var("REDIS_URL")?,
+            log_format,
         })
     }
 }
@@ -54,4 +66,12 @@ fn parse_allowed_ips(raw: &str) -> anyhow::Result<AllowedIps> {
     }
 
     Ok(AllowedIps::Cidrs(cidrs))
+}
+
+fn parse_log_format(raw: &str) -> anyhow::Result<LogFormat> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "text" => Ok(LogFormat::Text),
+        "json" => Ok(LogFormat::Json),
+        _ => anyhow::bail!("LOG_FORMAT must be 'text' or 'json'"),
+    }
 }
