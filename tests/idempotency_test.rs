@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 use axum::{
     Router,
     body::Body,
@@ -5,10 +6,18 @@ use axum::{
 };
 use tower::ServiceExt;
 
+||||||| 2822865
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+    Router,
+};
+use tower::ServiceExt;
+
+=======
+>>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
 #[cfg(test)]
 mod idempotency_tests {
-    use super::*;
-
     // Note: These tests require a running Redis instance
     // Run with: docker-compose up -d redis
 
@@ -19,20 +28,17 @@ mod idempotency_tests {
         // For now, it serves as a template for integration testing
 
         // TODO: Implement full integration test with test Redis instance
-        assert!(true);
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_idempotency_duplicate_request() {
         // TODO: Test that duplicate requests return cached response
-        assert!(true);
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_idempotency_processing_lock() {
         // TODO: Test that concurrent requests return 429
-        assert!(true);
     }
 }

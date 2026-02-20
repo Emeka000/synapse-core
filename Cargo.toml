@@ -19,8 +19,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 home = "=0.5.11"
 reqwest = { version = "0.11", features = ["json"] }
 redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+<<<<<<< HEAD
 failsafe = "1.3"
 ipnet = "2"
+||||||| 2822865
+=======
+failsafe = "1"
+>>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
 
 [dev-dependencies]
 mockito = "1"

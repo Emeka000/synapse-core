@@ -1,6 +1,10 @@
 use crate::db::models::Transaction;
 use sqlx::{PgPool, Result};
+<<<<<<< HEAD
 use uuid::Uuid;
+||||||| 2822865
+=======
+>>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
 
 pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Transaction> {
     sqlx::query_as!(
@@ -28,6 +32,7 @@ pub async fn insert_transaction(pool: &PgPool, tx: &Transaction) -> Result<Trans
     .await
 }
 
+<<<<<<< HEAD
 pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     sqlx::query_as!(
         Transaction,
@@ -40,6 +45,21 @@ pub async fn get_transaction(pool: &PgPool, id: Uuid) -> Result<Transaction> {
     )
     .fetch_one(pool)
     .await
+||||||| 2822865
+pub async fn get_transaction(pool: &PgPool, id: i32) -> Result<Transaction> {
+    sqlx::query_as!(
+        Transaction,
+        "SELECT * FROM transactions WHERE id = $1",
+        id
+    )
+    .fetch_one(pool)
+    .await
+=======
+pub async fn get_transaction(pool: &PgPool, id: i32) -> Result<Transaction> {
+    sqlx::query_as!(Transaction, "SELECT * FROM transactions WHERE id = $1", id)
+        .fetch_one(pool)
+        .await
+>>>>>>> refs/remotes/origin/feature/issue-18-circuit-breaker
 }
 
 pub async fn list_transactions(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<Transaction>> {
