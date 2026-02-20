@@ -4,6 +4,7 @@ pub mod error;
 pub mod handlers;
 pub mod services;
 pub mod stellar;
+pub mod schemas;
 
 use axum::{Router, routing::get};
 use crate::stellar::HorizonClient;

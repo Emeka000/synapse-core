@@ -6,17 +6,30 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 pub mod webhook;
 pub mod settlements;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct HealthStatus {
     status: String,
     version: String,
     db: String,
 }
 
+/// Health check endpoint
+/// 
+/// Returns the health status of the service including database connectivity
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Service is healthy", body = HealthStatus),
+        (status = 503, description = "Service is unhealthy", body = HealthStatus)
+    ),
+    tag = "Health"
+)]
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     // Check database connectivity with SELECT 1 query
     let db_status = match sqlx::query("SELECT 1").execute(&state.db).await {

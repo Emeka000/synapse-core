@@ -4,6 +4,7 @@ mod error;
 mod handlers;
 mod middleware;
 mod stellar;
+mod schemas;
 
 use axum::{Router, extract::State, routing::{get, post}, middleware as axum_middleware};
 use sqlx::migrate::Migrator; // for Migrator
@@ -14,6 +15,44 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
 use stellar::HorizonClient;
 use middleware::idempotency::IdempotencyService;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
+
+/// OpenAPI Schema for the Synapse Core API
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        handlers::health,
+        handlers::settlements::list_settlements,
+        handlers::settlements::get_settlement,
+        handlers::webhook::handle_webhook,
+        handlers::webhook::get_transaction,
+    ),
+    components(
+        schemas(
+            handlers::HealthStatus,
+            handlers::settlements::Pagination,
+            handlers::settlements::SettlementListResponse,
+            handlers::webhook::WebhookPayload,
+            handlers::webhook::WebhookResponse,
+            schemas::TransactionSchema,
+            schemas::SettlementSchema,
+        )
+    ),
+    info(
+        title = "Synapse Core API",
+        version = "0.1.0",
+        description = "Settlement and transaction management API for the Stellar network",
+        contact(name = "Synapse Team")
+    ),
+    tags(
+        (name = "Health", description = "Health check endpoints"),
+        (name = "Settlements", description = "Settlement management endpoints"),
+        (name = "Transactions", description = "Transaction management endpoints"),
+        (name = "Webhooks", description = "Webhook callback endpoints"),
+    )
+)]
+pub struct ApiDoc;
 
 #[derive(Clone)] // <-- Add Clone
 pub struct AppState {
@@ -67,13 +106,22 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(handlers::health))
         .merge(webhook_routes)
+        // Settlement routes
+        .route("/settlements", get(handlers::settlements::list_settlements))
+        .route("/settlements/:id", get(handlers::settlements::get_settlement))
+        // Transaction routes
+        .route("/transactions/:id", get(handlers::webhook::get_transaction))
+        // Swagger UI
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
     tracing::info!("listening on {}", addr);
+    tracing::info!("Swagger UI available at http://localhost:{}/swagger-ui/", config.server_port);
 
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }
+

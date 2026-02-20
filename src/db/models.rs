@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use sqlx::types::BigDecimal;
 use uuid::Uuid;
+use utoipa::ToSchema;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Transaction {
