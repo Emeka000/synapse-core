@@ -3,7 +3,7 @@ mod db;
 mod error;
 mod handlers;
 mod middleware;
-mod stellar;
+pub mod stellar;
 
 use axum::{Router, extract::State, routing::{get, post}, middleware as axum_middleware};
 use sqlx::migrate::Migrator; // for Migrator

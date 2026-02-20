@@ -117,6 +117,14 @@ Webhooks are protected against duplicate delivery using Redis-based idempotency:
 - Concurrent requests for the same key return `429 Too Many Requests`
 - See [docs/idempotency.md](docs/idempotency.md) for detailed documentation
 
+#### 🔄 Circuit Breaker
+
+The Stellar Horizon client includes a circuit breaker to prevent cascading failures:
+- Automatically detects when Horizon API is down or slow
+- Fails fast instead of waiting for timeouts
+- Configurable failure threshold and reset timeout
+- See [docs/circuit-breaker.md](docs/circuit-breaker.md) for detailed documentation
+
 🤝 Contributing
 We welcome contributions! Please see the open issues for tasks labeled phase-1. Each issue includes a description and acceptance criteria.
 When contributing:
