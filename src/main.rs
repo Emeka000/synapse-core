@@ -4,19 +4,17 @@ mod error;
 mod handlers;
 mod services;
 mod stellar;
+mod validation;
 
-use axum::{
-    Router,
-    routing::{get, put},
-};
-use db::pool_manager::PoolManager;
-use services::FeatureFlagService;
-use sqlx::migrate::Migrator;
-use std::net::SocketAddr;
-use std::path::Path;
+use axum::{Router, routing::get};
+use sqlx::migrate::Migrator; // for Migrator
+use std::net::SocketAddr; // for SocketAddr
+use std::path::Path; // for Path
 use stellar::HorizonClient;
-use tokio::net::TcpListener;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tokio::net::TcpListener; // for TcpListener
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
+use stellar::HorizonClient;
+use services::SettlementService;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -71,11 +69,27 @@ async fn main() -> anyhow::Result<()> {
         config.stellar_horizon_url
     );
 
-    // Initialize feature flags service
-    let feature_flags = FeatureFlagService::new(pool.clone());
-    feature_flags.refresh_cache().await?;
-    feature_flags.start(1); // Refresh every 1 hour
-    tracing::info!("Feature flags service initialized");
+    // Initialize Settlement Service
+    let settlement_service = SettlementService::new(pool.clone());
+    
+    // Start background settlement worker
+    let settlement_pool = pool.clone();
+    tokio::spawn(async move {
+        let service = SettlementService::new(settlement_pool);
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // Default to hourly
+        loop {
+            interval.tick().await;
+            tracing::info!("Running scheduled settlement job...");
+            match service.run_settlements().await {
+                Ok(results) => {
+                    if !results.is_empty() {
+                        tracing::info!("Successfully generated {} settlements", results.len());
+                    }
+                }
+                Err(e) => tracing::error!("Scheduled settlement job failed: {:?}", e),
+            }
+        }
+    });
 
     // Build router with state
     let app_state = AppState {
@@ -86,8 +100,8 @@ async fn main() -> anyhow::Result<()> {
     };
     let app = Router::new()
         .route("/health", get(handlers::health))
-        .route("/admin/flags", get(handlers::admin::get_flags))
-        .route("/admin/flags/:name", put(handlers::admin::update_flag))
+        .route("/settlements", get(handlers::settlements::list_settlements))
+        .route("/settlements/:id", get(handlers::settlements::get_settlement))
         .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
