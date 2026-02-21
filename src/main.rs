@@ -1,54 +1,230 @@
+mod cli;
 mod config;
 mod db;
 mod error;
 mod handlers;
-mod middleware;
 mod services;
 mod stellar;
+mod validation;
 
-use axum::{
-    Router,
-    extract::State,
-    middleware as axum_middleware,
-    routing::{get, post},
-};
-use handlers::ws::TransactionStatusUpdate;
-use middleware::idempotency::IdempotencyService;
+use axum::{Router, routing::get};
 use sqlx::migrate::Migrator; // for Migrator
 use std::net::SocketAddr; // for SocketAddr
 use std::path::Path; // for Path
 use stellar::HorizonClient;
 use tokio::net::TcpListener; // for TcpListener
-use tokio::sync::broadcast;
-use tracing_subscriber::prelude::*;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt}; // for .with() on registry
+use stellar::HorizonClient;
+use services::SettlementService;
 
-#[derive(Clone)] // <-- Add Clone
+#[derive(Clone)]
 pub struct AppState {
     db: sqlx::PgPool,
+    pub pool_manager: PoolManager,
     pub horizon_client: HorizonClient,
-    pub tx_broadcast: broadcast::Sender<TransactionStatusUpdate>,
+    pub feature_flags: FeatureFlagService,
+}
+
+// Custom key extractor for rate limiting
+#[derive(Clone)]
+struct IpKeyExtractor {
+    whitelisted_ips: Arc<tokio::sync::RwLock<Vec<String>>>,
+}
+
+impl IpKeyExtractor {
+    fn new() -> Self {
+        Self {
+            whitelisted_ips: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+        }
+    }
+
+    async fn add_whitelisted_ip(&self, ip: String) {
+        let mut whitelist = self.whitelisted_ips.write().await;
+        whitelist.push(ip);
+    }
+
+    async fn is_whitelisted(&self, ip: &str) -> bool {
+        let whitelist = self.whitelisted_ips.read().await;
+        whitelist.contains(&ip.to_string())
+    }
+}
+
+impl KeyExtractor for IpKeyExtractor {
+    type Key = String;
+
+    fn extract<B>(&self, req: &Request<B>) -> Result<Self::Key, tower_governor::GovernorError> {
+        // Try to get IP from various sources
+        let ip = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0.ip().to_string())
+            .or_else(|| {
+                req.headers()
+                    .get("x-forwarded-for")
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.split(',').next())
+                    .map(|s| s.trim().to_string())
+            })
+            .or_else(|| {
+                req.headers()
+                    .get("x-real-ip")
+                    .and_then(|h| h.to_str().ok())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        Ok(ip)
+    }
+}
+
+// Rate limiting configuration
+#[derive(Clone)]
+struct RateLimitConfig {
+    default_quota: Quota,
+    whitelist_quota: Quota,
+    key_extractor: IpKeyExtractor,
+}
+
+impl RateLimitConfig {
+    fn new(config: &config::Config) -> Self {
+        Self {
+            default_quota: Quota::per_second(config.default_rate_limit).unwrap(),
+            whitelist_quota: Quota::per_second(config.whitelist_rate_limit).unwrap(),
+            key_extractor: IpKeyExtractor::new(),
+        }
+    }
+
+    async fn get_quota_for_ip(&self, ip: &str) -> Quota {
+        if self.key_extractor.is_whitelisted(ip).await {
+            self.whitelist_quota
+        } else {
+            self.default_quota
+        }
+    }
+
+    async fn load_whitelisted_ips(&self, whitelist: &str) {
+        for ip in whitelist.split(',').map(|s| s.trim()) {
+            if !ip.is_empty() {
+                self.key_extractor.add_whitelisted_ip(ip.to_string()).await;
+                tracing::info!("Added whitelisted IP: {}", ip);
+            }
+        }
+    }
+}
+
+// Rate limiting middleware
+async fn rate_limit_middleware<B>(
+    req: Request<B>,
+    next: Next<B>,
+    config: Arc<RateLimitConfig>,
+) -> Response {
+    // Extract IP
+    let ip = config
+        .key_extractor
+        .extract(&req)
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    // Get appropriate quota for this IP
+    let quota = config.get_quota_for_ip(&ip).await;
+    
+    // Create rate limiter for this specific quota
+    let rate_limiter = governor::RateLimiter::direct(quota);
+    
+    // Check rate limit
+    match rate_limiter.check() {
+        Ok(_) => {
+            // Rate limit not exceeded, proceed
+            next.run(req).await
+        }
+        Err(negative) => {
+            // Rate limit exceeded, return 429
+            let wait_time = negative.wait_time_from(quota.replenish_interval());
+            let retry_after = wait_time.as_secs().max(1);
+            
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-ratelimit-limit",
+                (quota.burst_size().unwrap_or(10) as u64).to_string().parse().unwrap(),
+            );
+            headers.insert(
+                "x-ratelimit-remaining",
+                "0".parse().unwrap(),
+            );
+            headers.insert(
+                "retry-after",
+                retry_after.to_string().parse().unwrap(),
+            );
+            
+            tracing::warn!("Rate limit exceeded for IP: {}", ip);
+            
+            (StatusCode::TOO_MANY_REQUESTS, headers, "Too many requests. Please try again later.".to_string()).into_response()
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
     let config = config::Config::from_env()?;
 
     // Setup logging
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let env_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    match config.log_format {
+        config::LogFormat::Json => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tracing_subscriber::fmt::layer().json())
+                .init();
+        }
+        config::LogFormat::Text => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tracing_subscriber::fmt::layer())
+                .init();
+        }
+    }
 
-    // Database pool
+    match cli.command {
+        Some(Commands::Serve) | None => serve(config).await,
+        Some(Commands::Tx(tx_cmd)) => match tx_cmd {
+            TxCommands::ForceComplete { tx_id } => {
+                let pool = db::create_pool(&config).await?;
+                cli::handle_tx_force_complete(&pool, tx_id).await
+            }
+        },
+        Some(Commands::Db(db_cmd)) => match db_cmd {
+            DbCommands::Migrate => cli::handle_db_migrate(&config).await,
+        },
+        Some(Commands::Config) => cli::handle_config_validate(&config),
+    }
+}
+
+async fn serve(config: config::Config) -> anyhow::Result<()> {
     let pool = db::create_pool(&config).await?;
+
+    // Initialize pool manager for multi-region failover
+    let pool_manager = PoolManager::new(
+        &config.database_url,
+        config.database_replica_url.as_deref(),
+    )
+    .await?;
+    
+    if pool_manager.replica().is_some() {
+        tracing::info!("Database replica configured - read queries will be routed to replica");
+    } else {
+        tracing::info!("No replica configured - all queries will use primary database");
+    }
 
     // Run migrations
     let migrator = Migrator::new(Path::new("./migrations")).await?;
     migrator.run(&pool).await?;
     tracing::info!("Database migrations completed");
+
+    // Initialize partition manager (runs every 24 hours)
+    let partition_manager = db::partition::PartitionManager::new(pool.clone(), 24);
+    partition_manager.start();
+    tracing::info!("Partition manager started");
 
     // Initialize Stellar Horizon client
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
@@ -56,6 +232,44 @@ async fn main() -> anyhow::Result<()> {
         "Stellar Horizon client initialized with URL: {}",
         config.stellar_horizon_url
     );
+
+    // Initialize Settlement Service
+    let settlement_service = SettlementService::new(pool.clone());
+    
+    // Start background settlement worker
+    let settlement_pool = pool.clone();
+    tokio::spawn(async move {
+        let service = SettlementService::new(settlement_pool);
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600)); // Default to hourly
+        loop {
+            interval.tick().await;
+            tracing::info!("Running scheduled settlement job...");
+            match service.run_settlements().await {
+                Ok(results) => {
+                    if !results.is_empty() {
+                        tracing::info!("Successfully generated {} settlements", results.len());
+                    }
+                }
+                Err(e) => tracing::error!("Scheduled settlement job failed: {:?}", e),
+            }
+        }
+    });
+
+    // Initialize metrics
+    let metrics_handle = metrics::init_metrics()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize metrics: {}", e))?;
+    tracing::info!("Metrics initialized successfully");
+
+    // Initialize rate limiting
+    let rate_limit_config = Arc::new(RateLimitConfig::new(&config));
+    
+    // Load whitelisted IPs from config
+    if !config.whitelisted_ips.is_empty() {
+        rate_limit_config.load_whitelisted_ips(&config.whitelisted_ips).await;
+    }
+    
+    tracing::info!("Rate limiting configured: {} req/sec (default), {} req/sec (whitelisted)", 
+                   config.default_rate_limit, config.whitelist_rate_limit);
 
     // Initialize Redis idempotency service
     let idempotency_service = IdempotencyService::new(&config.redis_url)?;
@@ -69,27 +283,35 @@ async fn main() -> anyhow::Result<()> {
     // Build router with state
     let app_state = AppState {
         db: pool,
+        pool_manager,
         horizon_client,
-        tx_broadcast,
+        feature_flags,
     };
-
-    // Create webhook routes with idempotency middleware
-    let webhook_routes = Router::new()
-        .route("/webhook", post(handlers::webhook::handle_webhook))
-        .layer(axum_middleware::from_fn_with_state(
-            idempotency_service.clone(),
-            middleware::idempotency::idempotency_middleware,
+    
+    // Create metrics route with authentication middleware
+    let metrics_route = Router::new()
+        .route("/metrics", get(|
+            axum::extract::State(state): axum::extract::State<MetricsState>
+        | async move {
+            metrics::metrics_handler(
+                axum::extract::State(state.handle),
+                axum::extract::State(state.pool),
+            ).await
+        }))
+        .layer(middleware::from_fn_with_state(
+            config.clone(),
+            metrics::metrics_auth_middleware,
         ))
-        .with_state(app_state.clone());
-
+        .with_state(metrics_state);
+    
     let app = Router::new()
         .route("/health", get(handlers::health))
-        .route("/ws/transactions", get(handlers::ws::ws_handler))
-        .merge(webhook_routes)
+        .route("/settlements", get(handlers::settlements::list_settlements))
+        .route("/settlements/:id", get(handlers::settlements::get_settlement))
         .with_state(app_state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.server_port));
-    tracing::info!("listening on {}", addr);
+    tracing::info!("Server listening on {}", addr);
 
     let listener = TcpListener::bind(addr).await?;
     axum::serve(
