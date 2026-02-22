@@ -5,7 +5,8 @@ mod handlers;
 mod middleware;
 mod stellar;
 mod services;
-mod schemas;
+mod utils;
+mod startup;
 
 use axum::{Router, extract::State, routing::{get, post}, middleware as axum_middleware};
 use http::header::HeaderValue;
@@ -30,6 +31,9 @@ use utoipa_swagger_ui::SwaggerUi;
         handlers::settlements::get_settlement,
         handlers::webhook::handle_webhook,
         handlers::webhook::get_transaction,
+        handlers::admin::get_queue_status,
+        handlers::admin::get_failed_transactions,
+        handlers::admin::retry_transaction,
     ),
     components(
         schemas(
@@ -76,6 +80,10 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // Check for --dry-run flag
+    let args: Vec<String> = std::env::args().collect();
+    let dry_run = args.contains(&"--dry-run".to_string());
+
     // Database pool
     let pool = db::create_pool(&config).await?;
 
@@ -83,6 +91,21 @@ async fn main() -> anyhow::Result<()> {
     let migrator = Migrator::new(Path::new("./migrations")).await?;
     migrator.run(&pool).await?;
     tracing::info!("Database migrations completed");
+
+    // Run startup validation
+    let report = startup::validate_environment(&config, &pool).await?;
+    
+    if dry_run {
+        report.print();
+        std::process::exit(if report.is_valid() { 0 } else { 1 });
+    }
+    
+    if !report.is_valid() {
+        report.print();
+        anyhow::bail!("Startup validation failed");
+    }
+    
+    tracing::info!("✅ All startup checks passed");
 
     // Initialize Stellar Horizon client
     let horizon_client = HorizonClient::new(config.stellar_horizon_url.clone());
@@ -129,10 +152,17 @@ async fn main() -> anyhow::Result<()> {
     let dlq_routes = handlers::dlq::dlq_routes()
         .with_state(app_state.db.clone());
     
+    // Create Admin routes with auth middleware
+    let admin_routes = Router::new()
+        .nest("/admin/queue", handlers::admin::admin_routes())
+        .layer(axum_middleware::from_fn(middleware::auth::admin_auth))
+        .with_state(app_state.db.clone());
+
     let app = Router::new()
         .route("/health", get(handlers::health))
         .merge(webhook_routes)
         .merge(dlq_routes)
+        .merge(admin_routes)
         .layer(cors_layer)
         .with_state(app_state);
 
